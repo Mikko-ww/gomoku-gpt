@@ -344,7 +344,7 @@ class LLMRouter:
             raise ValueError(f"提供商 {provider_name} 不可用")
         
         provider_instance = self.providers[provider_name]
-        logger.info(f"message: {messages}")
+        logger.warning(f"message: {messages}")
         try:
             response = provider_instance.chat_completion(
                 messages=messages,
@@ -354,7 +354,7 @@ class LLMRouter:
                 **kwargs
             )
             logger.info(f"成功调用 {provider_name} - 模型: {response.model}")
-            logger.info(f"response: {response}")
+            logger.warning(f"response: {response}")
             return response
             
         except Exception as e:

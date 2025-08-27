@@ -26,21 +26,20 @@ COL_TO_IDX = {c: i for i, c in enumerate(COLS)}
 
 EMPTY, BLACK, WHITE = 0, 1, 2
 
-def call_llm(system: str, user: str) -> str:
-    """使用LLM路由器调用大语言模型（简单单轮接口）
+# def call_llm(system: str, user: str) -> str:
+#     """使用LLM路由器调用大语言模型（简单单轮接口）
 
-    注意：该方法为无状态HTTP调用，模型不会记住上下文。
-    为了让模型拿到完整信息，请在 user 参数中携带棋盘与走子历史。
-    本文件已提供 format_user_prompt() 组装完整信息。
-    """
-    try:
-        # 使用简单聊天接口（单轮）
-        response = llm_router.simple_chat(system=system, user=user, temperature=0.2, max_tokens=128)
-        logger.info(f"LLM响应成功: {response[:100]}...")
-        return response
-    except Exception as e:
-        logger.error(f"LLM调用失败: {e}")
-        return ""
+#     注意：该方法为无状态HTTP调用，模型不会记住上下文。
+#     为了让模型拿到完整信息，请在 user 参数中携带棋盘与走子历史。
+#     本文件已提供 format_user_prompt() 组装完整信息。
+#     """
+#     try:
+#         # 使用简单聊天接口（单轮）
+#         response = llm_router.simple_chat(system=system, user=user, temperature=0.2, max_tokens=256)
+#         return response
+#     except Exception as e:
+#         logger.error(f"LLM调用失败: {e}")
+#         return ""
 
 
 class Board:
@@ -124,36 +123,78 @@ def idx_to_coord(r: int, c: int) -> str:
 
 def format_system_prompt() -> str:
     return (
-        "你是五子棋AI对手。棋盘15×15，列A–O，行1–15。黑先，目标是五连。"
-        "必须输出严格JSON：{\"move\":\"<列行>\"}，例如 {\"move\":\"H8\"}。"
-        "不要输出任何解释或多余文本，不要换行，不要添加其他字段。"
+        "你是五子棋专家,15×15棋盘,行列索引0-14。\n"
+        "思考过程：\n"
+        "1. 当前局势评估\n"
+        "2. 威胁分析（对方可能的致胜点）\n"
+        "3. 自身进攻机会\n"
+        "4. 最终落子理由\n"
+        "输入格式说明：\n"
+        "• B:[r,c],[r,c]... - 黑棋位置\n"
+        "• W:[r,c],[r,c]... - 白棋位置\n"  
+        # "• H:[r,c],[r,c]... - 历史记录（按时间顺序）\n"
+        "• T:N - 当前轮到玩家N（1=黑棋,2=白棋）\n"
+        "• L:[r,c] - 最后一步移动\n\n"
+        "输出要求（严格执行）：\n"
+        "• 只输出一个坐标：[row,col]\n"
+        "• 不要输出任何分析、推理或解释文字\n"
+        "• 不要输出多行内容\n"
+        "• 示例：[7,8]"
     )
 
 def format_user_prompt(board: Board, ai_player: int) -> str:
-    """构造包含完整上下文的提示（无状态HTTP，每次携带全部信息）。"""
-    turn = "Black" if next_player(board) == BLACK else "White"
-    you = "Black" if ai_player == BLACK else "White"
-    last = idx_to_coord(*board.moves[-1][1]) if board.moves else "None"
-    # 将上下文用结构化JSON嵌入，便于模型解析
-    context = {
-        "size": SIZE,
-        "you_are": you,
-        "turn": turn,
-        "last_move": last,
-        "moves": [
-            {
-                "player": ("B" if p == BLACK else "W"),
-                "coord": idx_to_coord(r, c),
-            }
-            for p, (r, c) in board.moves
-        ],
-    }
-    ctx_json = json.dumps(context, ensure_ascii=False)
-    return (
-        "下面给出完整对局上下文(JSON)。请基于该上下文选择下一步。\n"
-        "要求：只能在空位落子，且坐标合法；只输出严格JSON {\"move\":\"<列行>\"}。\n"
-        f"上下文: {ctx_json}"
-    )
+    """构造紧凑但清晰的棋盘状态提示"""
+    
+    # 收集黑棋位置（玩家1）
+    black_positions = []
+    # 收集白棋位置（玩家2）  
+    white_positions = []
+    
+    for r in range(SIZE):
+        for c in range(SIZE):
+            cell_value = board.cell(r, c)
+            if cell_value == BLACK:
+                black_positions.append(f"[{r},{c}]")
+            elif cell_value == WHITE:
+                white_positions.append(f"[{r},{c}]")
+    
+    # 构建棋盘状态字符串
+    board_str = ""
+    if black_positions:
+        board_str += f"B:{','.join(black_positions)}"
+    if white_positions:
+        if board_str:
+            board_str += ";"
+        board_str += f"W:{','.join(white_positions)}"
+    
+    # # 构建历史记录
+    # history_moves = []
+    # for _, (r, c) in board.moves:
+    #     history_moves.append(f"[{r},{c}]")
+    
+    # history_str = ""
+    # if history_moves:
+    #     history_str = f"H:{','.join(history_moves)}"
+    
+    # 当前轮次和最后一步
+    current_turn = next_player(board)
+    turn_str = f"T:{current_turn}"
+    
+    last_move_str = ""
+    if board.moves:
+        last_r, last_c = board.moves[-1][1]
+        last_move_str = f"L:[{last_r},{last_c}]"
+    
+    # 组合所有部分
+    # parts = [s for s in [board_str, history_str, turn_str, last_move_str] if s]
+    parts = [s for s in [board_str, turn_str, last_move_str] if s]
+    compact_state = ";".join(parts)
+    
+    # 构建最终提示
+    player_color = "黑棋" if ai_player == BLACK else "白棋"
+    prompt = f"{compact_state}\n你是玩家{ai_player}（{player_color}）。"
+    
+    return prompt
 
 def build_messages_for_move(board: Board, ai_player: int) -> List[LLMMessage]:
     """构造一轮落子的对话消息（包含系统+用户，内含完整上下文）。"""
@@ -162,37 +203,117 @@ def build_messages_for_move(board: Board, ai_player: int) -> List[LLMMessage]:
         LLMMessage(role="user", content=format_user_prompt(board, ai_player)),
     ]
 
-def ask_ai_move_with_retry(board: Board, ai_player: int, retries: int = 2) -> Tuple[Optional[Tuple[int,int]], str]:
-    """在无状态HTTP下，采用“每次携带上下文 + 错误纠正重试”的策略获取AI走子。
+def get_legal_positions(board: Board) -> List[Tuple[int, int]]:
+    """获取所有合法的落子位置"""
+    return [(r, c) for r in range(SIZE) for c in range(SIZE) if board.cell(r, c) == EMPTY]
 
-    返回：(rc, raw_text)，若rc为None表示最终仍未解析出有效走子。
+def find_closest_legal_position(board: Board, target_rc: Tuple[int, int]) -> Optional[Tuple[int, int]]:
+    """找到最接近目标坐标的合法位置"""
+    if not target_rc:
+        return None
+    
+    target_r, target_c = target_rc
+    legal_positions = get_legal_positions(board)
+    
+    if not legal_positions:
+        return None
+    
+    # 如果目标位置合法，直接返回
+    if (target_r, target_c) in legal_positions:
+        return (target_r, target_c)
+    
+    # 找到距离最近的合法位置
+    min_distance = float('inf')
+    closest_pos = None
+    
+    for r, c in legal_positions:
+        distance = abs(r - target_r) + abs(c - target_c)  # 曼哈顿距离
+        if distance < min_distance:
+            min_distance = distance
+            closest_pos = (r, c)
+    
+    return closest_pos
+
+def ask_ai_move_single_call(board: Board, ai_player: int) -> Tuple[Optional[Tuple[int,int]], str]:
+    """单次API调用获取AI走法，使用智能后备策略处理无效响应。
+    
+    核心改进：
+    1. 只调用一次API，避免重复调用成本
+    2. 如果AI给出无效走法，使用智能算法找到最接近的合法位置
+    3. 如果完全无法解析，选择棋盘中心附近的位置
+    4. 统计并显示token使用情况
+    
+    返回：(rc, raw_text)，若rc为None表示无合法走子可选。
     """
     messages = build_messages_for_move(board, ai_player)
-    last_raw = ""
-    for attempt in range(retries + 1):
-        try:
-            resp = llm_router.chat_completion(messages=messages, temperature=0.2, max_tokens=128)
-            raw = resp.content or ""
-            last_raw = raw
-            mv = parse_move_from_json(raw)
-            rc = coord_to_idx(mv) if mv else None
-            # 校验合法性（坐标+空位）
+    
+    try:
+        # 单次API调用 - 严格限制输出长度
+        resp = llm_router.chat_completion(messages=messages, temperature=0.1, max_tokens=10)
+        raw = resp.content or ""
+        
+        # 显示token统计信息
+        if resp.usage:
+            prompt_tokens = resp.usage.get('prompt_tokens', 0)
+            completion_tokens = resp.usage.get('completion_tokens', 0)
+            total_tokens = resp.usage.get('total_tokens', 0)
+            
+            print(f"\n📊 Token使用统计:")
+            print(f"   Prompt tokens: {prompt_tokens}")
+            print(f"   Completion tokens: {completion_tokens}")
+            print(f"   Total tokens: {total_tokens}")
+            print(f"   模型: {resp.model}")
+            
+            logger.info(f"Token统计 - Prompt: {prompt_tokens}, Completion: {completion_tokens}, Total: {total_tokens}, Model: {resp.model}")
+        else:
+            logger.warning("未获取到token使用统计信息")
+        
+        logger.info(f"AI原始回复: {raw}")
+        
+        # 检查输出长度，如果过长则警告
+        if len(raw) > 20:
+            logger.warning(f"AI输出过长({len(raw)}字符)，可能未遵循格式要求")
+        
+        # 尝试解析JSON响应
+        mv = parse_move_from_json(raw)
+        if mv:
+            rc = mv  # mv现在直接是(row, col)元组
             if rc and board.in_bounds(*rc) and board.cell(*rc) == EMPTY:
+                logger.info(f"AI选择: {rc}")
                 return rc, raw
-            # 将错误反馈回模型，并要求修正
-            reason = "坐标非法或位置已被占用" if rc else "输出不是规定的严格JSON或坐标非法"
-            messages.append(LLMMessage(role="assistant", content=raw))
-            messages.append(LLMMessage(
-                role="user",
-                content=(
-                    f"刚才的答案有误：{reason}。请基于相同上下文，重新输出严格JSON，"
-                    f"只包含一个字段 move，例如 {{\"move\":\"H8\"}}。不要输出任何其他内容。"
-                )
-            ))
-        except Exception as e:
-            logger.error(f"LLM调用失败（第{attempt+1}次）：{e}")
-            break
-    return None, last_raw
+            
+            # AI给出了坐标但位置无效，寻找最接近的合法位置
+            closest = find_closest_legal_position(board, mv)
+            if closest:
+                logger.warning(f"AI坐标{mv}无效，选择最接近的合法位置: {closest}")
+                return closest, raw
+        
+        # 无法解析坐标，使用智能后备策略
+        return get_fallback_move(board), raw
+        
+    except Exception as e:
+        logger.error(f"AI调用失败: {e}")
+        return get_fallback_move(board), ""
+
+def get_fallback_move(board: Board) -> Optional[Tuple[int, int]]:
+    """智能后备策略：选择战略位置"""
+    legal_positions = get_legal_positions(board)
+    
+    if not legal_positions:
+        return None
+    
+    # 如果棋盘为空，选择中心位置
+    if len(board.moves) == 0:
+        center = SIZE // 2
+        return (center, center)
+    
+    # 优先选择距离棋盘中心较近的位置
+    center = SIZE // 2
+    legal_positions.sort(key=lambda pos: abs(pos[0] - center) + abs(pos[1] - center))
+    
+    # 从前几个候选位置中随机选择，增加游戏变化
+    candidates = legal_positions[:min(5, len(legal_positions))]
+    return random.choice(candidates)
 
 def next_player(board: Board) -> int:
     return BLACK if len(board.moves) % 2 == 0 else WHITE
@@ -204,9 +325,62 @@ def next_player(board: Board) -> int:
 #     r, c = random.choice(legal)
 #     return f'{{"move":"{idx_to_coord(r,c)}"}}'
 
-def parse_move_from_json(s: str) -> Optional[str]:
-    m = re.search(r'\"move\"\s*:\s*\"([A-Oa-o]\s*(?:[1-9]|1[0-5]))\"', s)
-    return m.group(1).upper() if m else None
+def parse_move_from_json(s: str) -> Optional[Tuple[int, int]]:
+    """解析AI返回的移动，支持多种格式"""
+    try:
+        # 首先尝试直接解析数组格式：[row,col]
+        array_match = re.search(r'\[(\d+),\s*(\d+)\]', s)
+        if array_match:
+            row, col = int(array_match.group(1)), int(array_match.group(2))
+            if 0 <= row < SIZE and 0 <= col < SIZE:
+                return (row, col)
+        
+        # 尝试直接JSON解析
+        try:
+            data = json.loads(s.strip())
+            # 如果直接是数组格式
+            if isinstance(data, list) and len(data) >= 2:
+                row, col = int(data[0]), int(data[1])
+                if 0 <= row < SIZE and 0 <= col < SIZE:
+                    return (row, col)
+            # 如果是对象格式
+            elif isinstance(data, dict):
+                if "row" in data and "col" in data:
+                    row, col = int(data["row"]), int(data["col"])
+                    if 0 <= row < SIZE and 0 <= col < SIZE:
+                        return (row, col)
+        except:
+            pass
+        
+        # 尝试其他模式匹配（向后兼容）
+        patterns = [
+            # 标准格式：{"row": 7, "col": 8}
+            r'"row"\s*:\s*(\d+).*?"col"\s*:\s*(\d+)', 
+            # 可能的变体：{"col": 8, "row": 7}
+            r'"col"\s*:\s*(\d+).*?"row"\s*:\s*(\d+)',
+            # 简单格式：row: 7, col: 8
+            r'row\s*:\s*(\d+).*?col\s*:\s*(\d+)',
+        ]
+        
+        for i, pattern in enumerate(patterns):
+            match = re.search(pattern, s)
+            if match:
+                if i == 0:  # row, col格式
+                    row, col = int(match.group(1)), int(match.group(2))
+                elif i == 1:  # col, row格式
+                    col, row = int(match.group(1)), int(match.group(2))
+                else:  # 简单格式
+                    row, col = int(match.group(1)), int(match.group(2))
+                
+                # 验证坐标范围
+                if 0 <= row < SIZE and 0 <= col < SIZE:
+                    return (row, col)
+            
+        return None
+        
+    except Exception as e:
+        logger.error(f"解析坐标时出错: {e}")
+        return None
 
 def game_loop(human_is_black=True):
     global b
@@ -224,9 +398,9 @@ def game_loop(human_is_black=True):
                 logger.error("非法坐标或位置已占，用如 H8 的格式再试。")
                 continue
         else:
-            # AI走：每次携带完整上下文 + 失败纠正重试
-            rc, raw = ask_ai_move_with_retry(b, ai_player, retries=2)
-            logger.info(f"AI 输出：{raw}")
+            # AI走：单次API调用 + 智能后备策略
+            rc, raw = ask_ai_move_single_call(b, ai_player)
+            logger.info(f"AI输出: {raw}")
             if not rc or not b.place(player, rc):
                 # 回退：强制改走一个随机合法点（兜底保证游戏可继续）
                 legal = [(r,c) for r in range(SIZE) for c in range(SIZE) if b.cell(r,c)==EMPTY]

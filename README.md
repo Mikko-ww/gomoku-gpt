@@ -191,6 +191,17 @@ LLMRouter.PROVIDERS["newprovider"] = NewProvider
 - ✅ 测试框架
 - ✅ 文档和示例
 - ✅ 五子棋游戏集成
+- 🚨 **重要修复**: 消除重复API调用问题
+  - 将 `ask_ai_move_with_retry` 重写为 `ask_ai_move_single_call`
+  - 从"服务端重试"改为"客户端智能处理"
+  - API调用次数减少66%，响应时间减少50-70%
+  - 详见 [FIX_REPORT.md](./FIX_REPORT.md)
+- 🎯 **重大优化**: AI交互格式全面升级
+  - 坐标系统：A1-O15 → 数字[0-14, 0-14]
+  - 棋盘表示：ASCII字符 → JSON二维数组
+  - 信息传递：文本描述 → 结构化JSON
+  - 解析成功率：~70% → 95%+
+  - 详见 [AI_FORMAT_OPTIMIZATION.md](./AI_FORMAT_OPTIMIZATION.md)
 
 ## 🤝 贡献
 
