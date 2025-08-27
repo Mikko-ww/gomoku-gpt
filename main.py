@@ -27,10 +27,15 @@ COL_TO_IDX = {c: i for i, c in enumerate(COLS)}
 EMPTY, BLACK, WHITE = 0, 1, 2
 
 def call_llm(system: str, user: str) -> str:
-    """使用LLM路由器调用大语言模型"""
+    """使用LLM路由器调用大语言模型（简单单轮接口）
+
+    注意：该方法为无状态HTTP调用，模型不会记住上下文。
+    为了让模型拿到完整信息，请在 user 参数中携带棋盘与走子历史。
+    本文件已提供 format_user_prompt() 组装完整信息。
+    """
     try:
-        # 使用简单聊天接口
-        response = llm_router.simple_chat(system=system, user=user)
+        # 使用简单聊天接口（单轮）
+        response = llm_router.simple_chat(system=system, user=user, temperature=0.2, max_tokens=128)
         logger.info(f"LLM响应成功: {response[:100]}...")
         return response
     except Exception as e:
@@ -119,22 +124,75 @@ def idx_to_coord(r: int, c: int) -> str:
 
 def format_system_prompt() -> str:
     return (
-        "你正在扮演五子棋对手。棋盘15×15，列A–O，行1–15。黑先，目标是五连。"
-        "禁止走出棋盘或落在已有棋子上。只输出JSON：{\"move\":\"<列行>\"}，例如 {\"move\":\"H8\"}。"
-        "你的输出格式必须是严格的JSON，不能有多余内容。"
+        "你是五子棋AI对手。棋盘15×15，列A–O，行1–15。黑先，目标是五连。"
+        "必须输出严格JSON：{\"move\":\"<列行>\"}，例如 {\"move\":\"H8\"}。"
+        "不要输出任何解释或多余文本，不要换行，不要添加其他字段。"
     )
 
 def format_user_prompt(board: Board, ai_player: int) -> str:
+    """构造包含完整上下文的提示（无状态HTTP，每次携带全部信息）。"""
     turn = "Black" if next_player(board) == BLACK else "White"
     you = "Black" if ai_player == BLACK else "White"
     last = idx_to_coord(*board.moves[-1][1]) if board.moves else "None"
+    # 将上下文用结构化JSON嵌入，便于模型解析
+    context = {
+        "size": SIZE,
+        "you_are": you,
+        "turn": turn,
+        "last_move": last,
+        "moves": [
+            {
+                "player": ("B" if p == BLACK else "W"),
+                "coord": idx_to_coord(r, c),
+            }
+            for p, (r, c) in board.moves
+        ],
+    }
+    ctx_json = json.dumps(context, ensure_ascii=False)
     return (
-        f"当前对局：\n"
-        f"- 轮到：{turn}（你是 {you}）\n"
-        f"- 已着法：{board.to_compact_moves() or 'None'}\n"
-        f"- 上一手：{last}\n"
-        f"请给出你的下一步，输出JSON，字段为 move，仅一个坐标，例如 {{\"move\":\"H8\"}}。"
+        "下面给出完整对局上下文(JSON)。请基于该上下文选择下一步。\n"
+        "要求：只能在空位落子，且坐标合法；只输出严格JSON {\"move\":\"<列行>\"}。\n"
+        f"上下文: {ctx_json}"
     )
+
+def build_messages_for_move(board: Board, ai_player: int) -> List[LLMMessage]:
+    """构造一轮落子的对话消息（包含系统+用户，内含完整上下文）。"""
+    return [
+        LLMMessage(role="system", content=format_system_prompt()),
+        LLMMessage(role="user", content=format_user_prompt(board, ai_player)),
+    ]
+
+def ask_ai_move_with_retry(board: Board, ai_player: int, retries: int = 2) -> Tuple[Optional[Tuple[int,int]], str]:
+    """在无状态HTTP下，采用“每次携带上下文 + 错误纠正重试”的策略获取AI走子。
+
+    返回：(rc, raw_text)，若rc为None表示最终仍未解析出有效走子。
+    """
+    messages = build_messages_for_move(board, ai_player)
+    last_raw = ""
+    for attempt in range(retries + 1):
+        try:
+            resp = llm_router.chat_completion(messages=messages, temperature=0.2, max_tokens=128)
+            raw = resp.content or ""
+            last_raw = raw
+            mv = parse_move_from_json(raw)
+            rc = coord_to_idx(mv) if mv else None
+            # 校验合法性（坐标+空位）
+            if rc and board.in_bounds(*rc) and board.cell(*rc) == EMPTY:
+                return rc, raw
+            # 将错误反馈回模型，并要求修正
+            reason = "坐标非法或位置已被占用" if rc else "输出不是规定的严格JSON或坐标非法"
+            messages.append(LLMMessage(role="assistant", content=raw))
+            messages.append(LLMMessage(
+                role="user",
+                content=(
+                    f"刚才的答案有误：{reason}。请基于相同上下文，重新输出严格JSON，"
+                    f"只包含一个字段 move，例如 {{\"move\":\"H8\"}}。不要输出任何其他内容。"
+                )
+            ))
+        except Exception as e:
+            logger.error(f"LLM调用失败（第{attempt+1}次）：{e}")
+            break
+    return None, last_raw
 
 def next_player(board: Board) -> int:
     return BLACK if len(board.moves) % 2 == 0 else WHITE
@@ -166,15 +224,11 @@ def game_loop(human_is_black=True):
                 logger.error("非法坐标或位置已占，用如 H8 的格式再试。")
                 continue
         else:
-            # AI走
-            sys_prompt = format_system_prompt()
-            usr_prompt = format_user_prompt(b, ai_player)
-            resp = call_llm(sys_prompt, usr_prompt)
-            logger.info(f"AI 输出：{resp}")
-            mv = parse_move_from_json(resp or "")
-            rc = coord_to_idx(mv) if mv else None
+            # AI走：每次携带完整上下文 + 失败纠正重试
+            rc, raw = ask_ai_move_with_retry(b, ai_player, retries=2)
+            logger.info(f"AI 输出：{raw}")
             if not rc or not b.place(player, rc):
-                # 回退：强制改走一个随机合法点
+                # 回退：强制改走一个随机合法点（兜底保证游戏可继续）
                 legal = [(r,c) for r in range(SIZE) for c in range(SIZE) if b.cell(r,c)==EMPTY]
                 if not legal:
                     logger.info("无合法步。和棋。")
