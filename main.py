@@ -6,6 +6,8 @@ import json
 
 from logger import logger
 from llm_router import LLMRouter, LLMMessage, get_llm_router
+from game_core import Board, SIZE, COLS, COL_TO_IDX, EMPTY, BLACK, WHITE, next_player, coord_to_idx, idx_to_coord
+from chess_analyzer import ChessAnalyzer
 
 # 尝试导入配置文件
 try:
@@ -20,11 +22,8 @@ except ImportError:
     logger.warning("未找到config.py，将使用环境变量配置")
     llm_router = get_llm_router()
 
-SIZE = 15
-COLS = [chr(ord('A') + i) for i in range(SIZE)]
-COL_TO_IDX = {c: i for i, c in enumerate(COLS)}
-
-EMPTY, BLACK, WHITE = 0, 1, 2
+# 初始化棋类分析器
+chess_analyzer = ChessAnalyzer()
 
 # def call_llm(system: str, user: str) -> str:
 #     """使用LLM路由器调用大语言模型（简单单轮接口）
@@ -42,108 +41,22 @@ EMPTY, BLACK, WHITE = 0, 1, 2
 #         return ""
 
 
-class Board:
-    def __init__(self):
-        self.g = [[EMPTY]*SIZE for _ in range(SIZE)]
-        self.moves = []  # list of (player, (r,c)), player in {BLACK, WHITE}
-
-    def in_bounds(self, r, c):
-        return 0 <= r < SIZE and 0 <= c < SIZE
-
-    def cell(self, r, c):
-        return self.g[r][c]
-
-    def place(self, player: int, rc: Tuple[int,int]) -> bool:
-        r, c = rc
-        if not self.in_bounds(r, c): return False
-        if self.g[r][c] != EMPTY: return False
-        self.g[r][c] = player
-        self.moves.append((player, (r,c)))
-        return True
-
-    def is_full(self) -> bool:
-        return all(self.g[r][c] != EMPTY for r in range(SIZE) for c in range(SIZE))
-
-    def check_win_from(self, r, c) -> bool:
-        player = self.g[r][c]
-        if player == EMPTY: return False
-        dirs = [(1,0),(0,1),(1,1),(1,-1)]
-        for dr, dc in dirs:
-            count = 1
-            for sgn in (1, -1):
-                nr, nc = r, c
-                while True:
-                    nr += dr*sgn; nc += dc*sgn
-                    if not self.in_bounds(nr, nc): break
-                    if self.g[nr][nc] == player:
-                        count += 1
-                    else:
-                        break
-            if count >= 5:
-                return True
-        return False
-
-    def check_last_win(self) -> bool:
-        if not self.moves: return False
-        _, (r, c) = self.moves[-1]
-        return self.check_win_from(r, c)
-
-    def to_compact_moves(self) -> str:
-        parts = []
-        for i, (p, (r, c)) in enumerate(self.moves):
-            who = 'B' if p == BLACK else 'W'
-            parts.append(f"{who}:{idx_to_coord(r, c)}")
-        return ", ".join(parts)
-
-    def render(self) -> str:
-        # ASCII board for terminal
-        s = []
-        header = "   " + " ".join(COLS)
-        s.append(header)
-        for r in range(SIZE):
-            row = [str(r+1).rjust(2)]
-            for c in range(SIZE):
-                v = self.g[r][c]
-                ch = '.'
-                if v == BLACK: ch = '●'
-                elif v == WHITE: ch = '○'
-                row.append(ch)
-            s.append(" ".join(row))
-        return "\n".join(s)
-
-def coord_to_idx(coord: str) -> Optional[Tuple[int,int]]:
-    m = re.fullmatch(r"([A-Oa-o])\s*([1-9]|1[0-5])", coord.strip())
-    if not m: return None
-    col = m.group(1).upper(); row = int(m.group(2))
-    c = COL_TO_IDX[col]; r = row - 1
-    return (r, c)
-
-def idx_to_coord(r: int, c: int) -> str:
-    return f"{COLS[c]}{r+1}"
-
 def format_system_prompt() -> str:
     return (
         "你是五子棋专家,15×15棋盘,行列索引0-14。\n"
-        "思考过程：\n"
-        "1. 当前局势评估\n"
-        "2. 威胁分析（对方可能的致胜点）\n"
-        "3. 自身进攻机会\n"
-        "4. 最终落子理由\n"
-        "输入格式说明：\n"
-        "• B:[r,c],[r,c]... - 黑棋位置\n"
-        "• W:[r,c],[r,c]... - 白棋位置\n"  
-        # "• H:[r,c],[r,c]... - 历史记录（按时间顺序）\n"
-        "• T:N - 当前轮到玩家N（1=黑棋,2=白棋）\n"
-        "• L:[r,c] - 最后一步移动\n\n"
-        "输出要求（严格执行）：\n"
-        "• 只输出一个坐标：[row,col]\n"
-        "• 不要输出任何分析、推理或解释文字\n"
-        "• 不要输出多行内容\n"
-        "• 示例：[7,8]"
+        "决策优先级：\n"
+        "1. 我能一步获胜→立即获胜\n"
+        "2. 对手下一步获胜→必须阻止\n"
+        "3. 创建活四、冲四威胁\n"
+        "4. 阻止对手威胁棋型\n"
+        "5. 选择最有价值位置\n\n"
+        "输入格式：B:[r,c]... - 黑棋位置; W:[r,c]... - 白棋位置; T:N - 当前轮到玩家N; L:[r,c] - 最后一步\n"
+        "ANALYSIS: 必防[r,c] - 必须防守点; 机会[r,c] - 进攻机会点\n\n"
+        "输出要求：只输出坐标[row,col]，如：[7,8]"
     )
 
 def format_user_prompt(board: Board, ai_player: int) -> str:
-    """构造紧凑但清晰的棋盘状态提示"""
+    """构造紧凑但清晰的棋盘状态提示，包含智能分析"""
     
     # 收集黑棋位置（玩家1）
     black_positions = []
@@ -167,15 +80,6 @@ def format_user_prompt(board: Board, ai_player: int) -> str:
             board_str += ";"
         board_str += f"W:{','.join(white_positions)}"
     
-    # # 构建历史记录
-    # history_moves = []
-    # for _, (r, c) in board.moves:
-    #     history_moves.append(f"[{r},{c}]")
-    
-    # history_str = ""
-    # if history_moves:
-    #     history_str = f"H:{','.join(history_moves)}"
-    
     # 当前轮次和最后一步
     current_turn = next_player(board)
     turn_str = f"T:{current_turn}"
@@ -185,14 +89,42 @@ def format_user_prompt(board: Board, ai_player: int) -> str:
         last_r, last_c = board.moves[-1][1]
         last_move_str = f"L:[{last_r},{last_c}]"
     
+    # 进行智能棋盘分析（简化版）
+    analysis_result = chess_analyzer.analyze_board(board, ai_player)
+    
+    # 构建简化分析字符串
+    analysis_str = "ANALYSIS:"
+    
+    # 威胁分析（最重要）
+    if analysis_result["threats"]:
+        critical_threats = [t for t in analysis_result["threats"] if t["level"].name == "CRITICAL"]
+        if critical_threats:
+            # 找到最紧急的威胁防守点
+            for threat in critical_threats[:1]:  # 只处理第一个最紧急威胁
+                if threat["defense_points"]:
+                    defense_point = threat["defense_points"][0]
+                    analysis_str += f" 必防[{defense_point[0]},{defense_point[1]}]"
+                    break
+    
+    # 我方机会分析
+    if analysis_result["opportunities"]:
+        best_opportunity = analysis_result["opportunities"][0]  # 第一个就是最好的机会
+        if best_opportunity["upgrade_points"]:
+            upgrade_point = best_opportunity["upgrade_points"][0]
+            analysis_str += f" 机会[{upgrade_point[0]},{upgrade_point[1]}]"
+    
     # 组合所有部分
-    # parts = [s for s in [board_str, history_str, turn_str, last_move_str] if s]
     parts = [s for s in [board_str, turn_str, last_move_str] if s]
     compact_state = ";".join(parts)
     
     # 构建最终提示
     player_color = "黑棋" if ai_player == BLACK else "白棋"
-    prompt = f"{compact_state}\n你是玩家{ai_player}（{player_color}）。"
+    
+    # 如果分析为空，不包含ANALYSIS部分
+    if analysis_str == "ANALYSIS:":
+        prompt = f"{compact_state}\n你是玩家{ai_player}（{player_color}）。"
+    else:
+        prompt = f"{compact_state}\n{analysis_str}\n你是玩家{ai_player}（{player_color}）。"
     
     return prompt
 
@@ -249,7 +181,7 @@ def ask_ai_move_single_call(board: Board, ai_player: int) -> Tuple[Optional[Tupl
     
     try:
         # 单次API调用 - 严格限制输出长度
-        resp = llm_router.chat_completion(messages=messages, temperature=0.1, max_tokens=10)
+        resp = llm_router.chat_completion(messages=messages, temperature=0.1, max_tokens=50)
         raw = resp.content or ""
         
         # 显示token统计信息
@@ -314,9 +246,6 @@ def get_fallback_move(board: Board) -> Optional[Tuple[int, int]]:
     # 从前几个候选位置中随机选择，增加游戏变化
     candidates = legal_positions[:min(5, len(legal_positions))]
     return random.choice(candidates)
-
-def next_player(board: Board) -> int:
-    return BLACK if len(board.moves) % 2 == 0 else WHITE
 
 # TODO: 将此函数替换为你的大模型API调用，确保只返回如 {"move":"H8"} 的字符串
 # def call_llm(system: str, user: str) -> str:
