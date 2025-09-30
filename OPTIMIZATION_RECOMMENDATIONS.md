@@ -26,7 +26,7 @@
 
 ```
 gomoku-gpt/
-├── gomoku_gpt/
+├── src/
 │   ├── __init__.py
 │   ├── core/
 │   │   ├── __init__.py
