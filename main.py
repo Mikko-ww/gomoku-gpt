@@ -51,7 +51,7 @@ def format_system_prompt() -> str:
         "4. 阻止对手威胁棋型\n"
         "5. 选择最有价值位置\n\n"
         "输入格式：B:[r,c]... - 黑棋位置; W:[r,c]... - 白棋位置; T:N - 当前轮到玩家N; L:[r,c] - 最后一步\n"
-        "ANALYSIS: 必防[r,c] - 必须防守点; 机会[r,c] - 进攻机会点\n\n"
+        # "ANALYSIS: 必防[r,c] - 必须防守点; 机会[r,c] - 进攻机会点\n\n"
         "输出要求：只输出坐标[row,col]，如：[7,8]"
     )
 
@@ -90,28 +90,28 @@ def format_user_prompt(board: Board, ai_player: int) -> str:
         last_move_str = f"L:[{last_r},{last_c}]"
     
     # 进行智能棋盘分析（简化版）
-    analysis_result = chess_analyzer.analyze_board(board, ai_player)
+    # analysis_result = chess_analyzer.analyze_board(board, ai_player)
     
     # 构建简化分析字符串
     analysis_str = "ANALYSIS:"
     
-    # 威胁分析（最重要）
-    if analysis_result["threats"]:
-        critical_threats = [t for t in analysis_result["threats"] if t["level"].name == "CRITICAL"]
-        if critical_threats:
-            # 找到最紧急的威胁防守点
-            for threat in critical_threats[:1]:  # 只处理第一个最紧急威胁
-                if threat["defense_points"]:
-                    defense_point = threat["defense_points"][0]
-                    analysis_str += f" 必防[{defense_point[0]},{defense_point[1]}]"
-                    break
+    # # 威胁分析（最重要）
+    # if analysis_result["threats"]:
+    #     critical_threats = [t for t in analysis_result["threats"] if t["level"].name == "CRITICAL"]
+    #     if critical_threats:
+    #         # 找到最紧急的威胁防守点
+    #         for threat in critical_threats[:1]:  # 只处理第一个最紧急威胁
+    #             if threat["defense_points"]:
+    #                 defense_point = threat["defense_points"][0]
+    #                 analysis_str += f" 必防[{defense_point[0]},{defense_point[1]}]"
+    #                 break
     
-    # 我方机会分析
-    if analysis_result["opportunities"]:
-        best_opportunity = analysis_result["opportunities"][0]  # 第一个就是最好的机会
-        if best_opportunity["upgrade_points"]:
-            upgrade_point = best_opportunity["upgrade_points"][0]
-            analysis_str += f" 机会[{upgrade_point[0]},{upgrade_point[1]}]"
+    # # 我方机会分析
+    # if analysis_result["opportunities"]:
+    #     best_opportunity = analysis_result["opportunities"][0]  # 第一个就是最好的机会
+    #     if best_opportunity["upgrade_points"]:
+    #         upgrade_point = best_opportunity["upgrade_points"][0]
+    #         analysis_str += f" 机会[{upgrade_point[0]},{upgrade_point[1]}]"
     
     # 组合所有部分
     parts = [s for s in [board_str, turn_str, last_move_str] if s]
